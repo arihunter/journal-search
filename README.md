@@ -4,7 +4,7 @@
 
  To ideate further :
    Integrate Guardrails like thing 
-   Add user-specific UI and build an AI to keep iterating.
+   Add user-specific UI .
    
 
    
