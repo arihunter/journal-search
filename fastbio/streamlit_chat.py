@@ -180,13 +180,19 @@ if st.session_state.search:
     with tab1:
         queryCol1,queryCol2 = st.columns([0.8,0.2])
         with queryCol1:
-            st.subheader("Query")
-            st.markdown(st.session_state.query)
+            #st.subheader("Query")
+            st.write(f'<p style="font-size:30px"><b>Query</b></p>',unsafe_allow_html=True)
+            #st.markdown(st.session_state.query)
+            st.write(f'{st.session_state.query}',
+unsafe_allow_html=True)
         with queryCol2:
             st.button("Edit Query",on_click = editcallback)
-        st.subheader("Response")
-        st.markdown(f"{st.session_state.response}")
-
+        st.write(f'<p style="font-size:30px"><b>Response</b></p>',unsafe_allow_html=True)
+        #st.markdown(f"*:{st.session_state.response}:*")
+        st.write(f'<i>{st.session_state.response}</i>',
+unsafe_allow_html=True)
+        st.markdown("")
+        st.markdown("")
         otherPapercheck = []
         with st.expander("Citations"):
             for i,reference in enumerate(citations):
@@ -198,7 +204,7 @@ if st.session_state.search:
                 with citationsCol2:
                     st.button(":thumbsdown:",key=f"Citations{i}")    
 
-
+        st.markdown("")
         if response != None:
             createNewQuestions(st.session_state.query,st.session_state.response) 
 
