@@ -1,109 +1,504 @@
-import os
-import tempfile
 import streamlit as st
-from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import PyPDFLoader
-from langchain.memory import ConversationBufferMemory
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.chains import ConversationalRetrievalChain
-from langchain.vectorstores import DocArrayInMemorySearch
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-st.set_page_config(page_title="Chat with Documents Using LangChain")
-st.title("Chat with Documents with LangChain")
+from pubmed_manager import PubmedManager
+from llama_index import VectorStoreIndex
+from llama_index.evaluation import DatasetGenerator
+from llama_index.readers.schema.base import Document
+import os 
+import openai
+import uuid
 
 
-@st.cache_resource
-def configure_retriever(uploaded_files):
-    # Read documents
-    docs = []
-    temp_dir = tempfile.TemporaryDirectory()
-    for file in uploaded_files:
-        temp_filepath = os.path.join(temp_dir.name, file.name)
-        with open(temp_filepath, "wb") as f:
-            f.write(file.getvalue())
-        loader = PyPDFLoader(temp_filepath)
-        docs.extend(loader.load())
-
-    # Split documents
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
-
-    # Create embeddings and store in vectordb
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vectordb = DocArrayInMemorySearch.from_documents(splits, embeddings)
-
-    # Define retriever
-    retriever = vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 4, "fetch_k": 6})
-
-    return retriever
+#initialisation
+if "search" not in st.session_state:
+    st.session_state["search"] = False
+if "query" not in st.session_state:
+    st.session_state["query"] = None
+if "response" not in st.session_state:
+    st.session_state["response"] = None
+if "feedbackRating" not in st.session_state:
+    st.session_state["feedbackRating"] = None
+if "feedbackText" not in st.session_state:
+    st.session_state["feedbackText"] = None
+if "apikey" not in st.session_state:
+    st.session_state["apikey"] = None
+if "references" not in st.session_state:
+    st.session_state["references"] = []
 
 
-class StreamHandler(BaseCallbackHandler):
-    def __init__(self, container: st.delta_generator.DeltaGenerator, initial_text: str = ""):
-        self.container = container
-        self.text = initial_text
+#streamlit code
 
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        self.text += token
-        self.container.markdown(self.text)
+st.set_page_config(page_title="fastbio")
+col1,col2,col3 = st.columns([1,1,1])
+col2.title("FastBio")
+st.divider()
 
-
-class PrintRetrievalHandler(BaseCallbackHandler):
-    def __init__(self, container):
-        self.container = container.expander("Context Retrieval")
-
-    def on_retriever_start(self, query: str, **kwargs):
-        self.container.write(f"**Question:** {query}")
-
-    def on_retriever_end(self, documents, **kwargs):
-        # self.container.write(documents)
-        for idx, doc in enumerate(documents):
-            source = os.path.basename(doc.metadata["source"])
-            self.container.write(f"**Document {idx} from {source}**")
-            self.container.markdown(doc.page_content)
-
-
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
+#sidebar
+apiKey = st.sidebar.text_input("OpenAI API Key", type="password")
+st.session_state.apikey = apiKey
+if not apiKey:
     st.info("Please add your OpenAI API key to continue.")
     st.stop()
+openai.api_key = apiKey
 
-uploaded_files = st.sidebar.file_uploader(
-    label="Upload PDF files", type=["pdf"], accept_multiple_files=True
-)
-if not uploaded_files:
-    st.info("Please upload PDF documents to continue.")
-    st.stop()
 
-retriever = configure_retriever(uploaded_files)
+#main content
 
-# Setup memory for contextual conversation
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-# Setup LLM and QA chain
-llm = ChatOpenAI(
-    model_name="gpt-4", openai_api_key=openai_api_key, temperature=0, streaming=True
-)
-qa_chain = ConversationalRetrievalChain.from_llm(
-    llm, retriever=retriever, memory=memory, verbose=True
-)
 
-if "messages" not in st.session_state or st.sidebar.button("Clear message history"):
-    st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
 
-for msg in st.session_state.messages:
-    st.text(msg["role"]).write(msg["content"])
+#add logic to create a userId
+#link userId to VectorStoreIndices
+#@st.cache_resource(show_spinner=False)
+class SearchBackend1():
+  def __init__(self):
+    #   self.indexCreated = False
+    self.index = None
+    #self.queryEngine = None
+    #self.persistDir = "/Users/arihantbarjatya/Documents/fastbio/database_storage/stored_embeddings/pubmed"
+    #self.userId = str(uuid.uuid4())
+    self.pubObj = PubmedManager()
 
-user_query = st.chat_input(placeholder="Ask me anything!")
 
-if user_query:
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    st.chat_message("user").write(user_query)
+  #@st.cache_data(show_spinner=False)
+  def fetch_docs(_self,query):
+    docs = _self.pubObj.fetch_details(query)
+    return docs
+  
+  def update_index(self,docs):  
+    for doc in docs:
+      self.index.insert(doc)
 
-    with st.chat_message("assistant"):
-        retrieval_handler = PrintRetrievalHandler(st.container())
-        stream_handler = StreamHandler(st.empty())
-        response = qa_chain.run(user_query, callbacks=[retrieval_handler, stream_handler])
-        st.session_state.messages.append({"role": "assistant", "content": response})
+
+  # add userId logic so once a users DB is created its remembered
+  @st.cache_data(show_spinner=False)
+  def main(_self,query):
+    with st.spinner("Creating the best response for you"):
+        currentDocs,pubmedPapers = _self.fetch_docs(query)
+        
+        _self.index = VectorStoreIndex.from_documents(currentDocs)
+        _self.queryEngine = _self.index.as_query_engine()
+        response = _self.queryEngine.query(query)
+        
+        citations = []
+        for node in response.source_nodes:
+            title = node.node.metadata["Title of this paper"]
+            url = node.node.metadata["URL"]
+            citations.append((title,url))
+    
+    return response,citations,pubmedPapers
+
+def searchButtonCallback():
+    st.session_state.search = True
+
+
+if st.session_state["search"] == False:
+    # engine = st.selectbox('Select Engine',["Engine1","Engine2","Engine3"])   
+    # st.session_state["engine"] = engine
+    if st.session_state.query == None:
+        userInput = st.text_input("Search with papers")
+    else:
+        userInput = st.text_input("Search with papers",value=st.session_state.query)
+    st.session_state.query = userInput
+    buttonClick = st.button("Ask",on_click=searchButtonCallback)
+
+def log():
+    pass
+
+def editcallback():
+    st.session_state["search"] = False
+    st.session_state["response"] = None
+    st.session_state["feedbackRating"] = None
+    st.session_state["feedbackText"] = None
+    #st.session_state["engine"] = None
+    st.session_state["references"] = []
+
+def reboot():
+    st.session_state["search"] = False
+    st.session_state["query"] = None
+    st.session_state["response"] = None
+    st.session_state["feedbackRating"] = None
+    st.session_state["feedbackText"] = None
+    #st.session_state["engine"] = None
+    st.session_state["references"] = []
+
+def generatedQuestionCallback(newQuery):
+    log()
+    st.session_state["query"] = newQuery
+    st.session_state["response"] = None
+    st.session_state["feedbackRating"] = None
+    st.session_state["feedbackText"] = None
+    st.session_state["references"] = []
+    st.session_state["search"] = True
+
+
+
+@st.cache_data(show_spinner=False,experimental_allow_widgets=True)
+def createNewQuestions(query,response):
+    responseDoc = Document(text=response,extra_info={"Original Query":query})
+    dataGenerator = DatasetGenerator.from_documents([responseDoc])
+    newQuestions = dataGenerator.generate_questions_from_nodes()
+    #print(newQuestions)
+    numberOfQuestions = 3        
+    
+    try:
+        newQuestions = newQuestions[:numberOfQuestions]
+    except Exception as e:
+        pass
+    
+    newQuestions = sorted(newQuestions,key=len)     
+    n = len(newQuestions)
+
+    col1,col2,col3 = st.columns([0.3,0.3,0.4])
+
+    try:
+        col1.button(newQuestions[0],on_click=generatedQuestionCallback,args=[newQuestions[0]])
+    except Exception as e:
+        pass
+
+    try:
+        col2.button(newQuestions[1],on_click=generatedQuestionCallback,args=[newQuestions[1]])
+    except Exception as e:
+        pass
+
+    try:
+        col3.button(newQuestions[2],on_click=generatedQuestionCallback,args=[newQuestions[2]])
+    except Exception as e:
+        pass
+    
+
+searchObj1 = SearchBackend1()
+
+if st.session_state.search:
+
+    response,citations,pubmedPapers = searchObj1.main(st.session_state.query)
+    st.session_state.response = str(response)
+    st.session_state.references = citations
+
+
+    tab1,tab2 = st.tabs(["Home","More Info!"])
+    
+    with tab1:
+        col1,col2 = st.columns([0.8,0.2])
+        with col1:
+            st.subheader("Query")
+            st.markdown(st.session_state.query)
+        with col2:
+            st.button("Edit Query",on_click = editcallback)
+        st.subheader("Response")
+        st.markdown(st.session_state.response)
+
+        otherPapercheck = []
+        with st.expander("Citations"):
+            for i,reference in enumerate(citations):
+                col1,col2 = st.columns([0.9,0.1])
+                with col1:
+                    st.caption(reference[0])
+                    st.caption(reference[1])
+                    otherPapercheck.append(str(reference[1]))
+                with col2:
+                    st.button(":thumbsdown:",key=f"Citations{i}")    
+
+
+        if response != None:
+            createNewQuestions(st.session_state.query,st.session_state.response) 
+
+
+        st.divider()
+        st.subheader("Feedback")
+
+        responseFeedback = st.radio('Choose for the generated response',options=('Correct Response, No Hallucinations','Hallucinations','Didnt Like the Response','No Response'))
+        st.session_state["feedbackRating"] = responseFeedback
+        if responseFeedback:
+            feedbackText = st.text_area("Please help us understand your feedback better")
+            st.session_state["feedbackText"] = feedbackText
+        st.markdown("")
+        st.markdown("") 
+        col1, col2, col3 = st.columns([1,1,1])
+        col2.button("Search Again!", on_click=reboot,type="primary")
+
+    
+    with tab2:
+        with st.expander("Other relevant papers"):
+            for i,data in enumerate(pubmedPapers):
+                url = data["url"]
+                url = str(url)
+                col1,col2 = st.columns([0.9,0.1])
+                if url not in otherPapercheck:
+                    with col1:
+                        st.caption(data["title"])
+                        st.caption(url)
+                    with col2:
+                        st.button(":thumbsup:",key=f"{i}")
+
+
+
+# import streamlit as st
+# from pubmed_manager import PubmedManager
+# from llama_index import VectorStoreIndex
+# from llama_index.evaluation import DatasetGenerator
+# from llama_index.readers.schema.base import Document
+# import os 
+# import openai
+# import uuid
+
+
+# #initialisation
+# if "search" not in st.session_state:
+#     st.session_state["search"] = False
+# if "query" not in st.session_state:
+#     st.session_state["query"] = None
+# if "response" not in st.session_state:
+#     st.session_state["response"] = None
+# if "feedbackRating" not in st.session_state:
+#     st.session_state["feedbackRating"] = None
+# if "feedbackText" not in st.session_state:
+#     st.session_state["feedbackText"] = None
+# if "apikey" not in st.session_state:
+#     st.session_state["apikey"] = None
+# if "references" not in st.session_state:
+#     st.session_state["references"] = []
+
+
+# #streamlit code
+
+# st.set_page_config(page_title="fastbio")
+# col1,col2,col3 = st.columns([1,1,1])
+# col2.title("FastBio")
+# st.divider()
+
+# #sidebar
+# apiKey = st.sidebar.text_input("OpenAI API Key", type="password")
+# st.session_state.apikey = apiKey
+# if not apiKey:
+#     st.info("Please add your OpenAI API key to continue.")
+#     st.stop()
+# openai.api_key = apiKey
+
+
+# #main content
+
+
+
+
+# #add logic to create a userId
+# #link userId to VectorStoreIndices
+# #@st.cache_resource(show_spinner=False)
+# class SearchBackend1():
+#   def __init__(self):
+#     #   self.indexCreated = False
+#     self.index = None
+#     self.queryEngine = None
+#     #self.persistDir = "/Users/arihantbarjatya/Documents/fastbio/database_storage/stored_embeddings/pubmed"
+#     #self.userId = str(uuid.uuid4())
+#     self.pubObj = PubmedManager()
+
+
+#   #@st.cache_data(show_spinner=False)
+#   def fetch_docs(_self,query):
+#     docs,papers = _self.pubObj.fetch_details(query)
+#     return docs,papers
+  
+#   def update_index(self,docs):  
+#     for doc in docs:
+#       self.index.insert(doc)
+
+
+#   # add userId logic so once a users DB is created its remembered
+#   @st.cache_data(show_spinner=False)
+#   def main(_self,query):
+#     with st.spinner("Creating the best response for you"):
+#         currentDocs,ogPapers = _self.fetch_docs(query)
+#         _self.index = VectorStoreIndex.from_documents(currentDocs)
+#         _self.queryEngine = _self.index.as_query_engine()
+        
+#         # if self.indexCreated == False:
+#         #     self.index = VectorStoreIndex.from_documents(currentDocs)
+#         #     self.index.set_index_id(self.userId)
+#         #     indexPath = self.persistDir+"/"+self.userId
+#         #     if not os.path.exists(indexPath):
+#         #         os.makedirs(indexPath)
+#         #     self.index.storage_context.persist(indexPath)
+#         #     self.indexCreated = True
+#         #     self.queryEngine = self.index.as_query_engine()
+#         # else:
+#         #     self.update_index(currentDocs)
+#         #     self.queryEngine = self.index.as_query_engine()
+    
+#         response = _self.queryEngine.query(query)
+#         citations = []
+#         for node in response.source_nodes:
+#             title = node.node.metadata["Title of this paper"]
+#             url = node.node.metadata["URL"]
+#             citations.append((title,url))
+    
+#     return response,citations,ogPapers
+
+# def searchButtonCallback():
+# 	st.session_state.search = True
+
+
+# if st.session_state["search"] == False:
+#     # engine = st.selectbox('Select Engine',["Engine1","Engine2","Engine3"])   
+#     # st.session_state["engine"] = engine
+#     if st.session_state.query == None:
+#         userInput = st.text_input("Search with papers")
+#     else:
+#         userInput = st.text_input("Search with papers",value=st.session_state.query)
+#     st.session_state.query = userInput
+#     buttonClick = st.button("Ask",on_click=searchButtonCallback)
+
+
+# def editcallback():
+#     st.session_state["search"] = False
+#     st.session_state["response"] = None
+#     st.session_state["feedbackRating"] = None
+#     st.session_state["feedbackText"] = None
+#     #st.session_state["engine"] = None
+#     st.session_state["references"] = []
+
+# def log():
+#     pass
+
+# def reboot():
+#     log()
+#     st.session_state["search"] = False
+#     st.session_state["query"] = None
+#     st.session_state["response"] = None
+#     st.session_state["feedbackRating"] = None
+#     st.session_state["feedbackText"] = None
+#     #st.session_state["engine"] = None
+#     st.session_state["references"] = []
+
+# def feedbackEngine(_id):
+#     key = f"feedbackEngine{_id}"
+#     if key not in st.session_state:
+#         st.session_state[key] = False
+#     st.session_state[key] = True
+
+# def feedbackPubmed(_id):
+#     key = f"feedbackPubmed{_id}"
+#     if key not in st.session_state:
+#         st.session_state[key] = False
+#     st.session_state[key] = True
+
+# def generatedQuestionCallback(newQuery):
+#     log()
+#     st.session_state["query"] = newQuery
+#     st.session_state["response"] = None
+#     st.session_state["feedbackRating"] = None
+#     st.session_state["feedbackText"] = None
+#     st.session_state["references"] = []
+#     st.session_state["search"] = True
+
+
+
+# @st.cache_data(show_spinner=False,experimental_allow_widgets=True)
+# def createNewQuestions(query,response):
+#     responseDoc = Document(text=response,extra_info={"Original Query":query})
+#     dataGenerator = DatasetGenerator.from_documents([responseDoc])
+#     newQuestions = dataGenerator.generate_questions_from_nodes()
+#     numberOfQuestions = 3        
+    
+#     try:
+#         newQuestions = newQuestions[:numberOfQuestions]
+#     except Exception as e:
+#         pass
+    
+#     newQuestions = sorted(newQuestions,key=len)     
+#     n = len(newQuestions)
+#     for question in newQuestions:
+#         st.button(question,on_click=generatedQuestionCallback,args=[question])
+
+# searchObj1 = SearchBackend1()
+
+# if st.session_state.search:
+
+#     response,citations,pubmedPapers = searchObj1.main(st.session_state.query)
+#     st.session_state.response = str(response)
+#     st.session_state.references = citations
+#     urlsOnly = [x[1] for x in citations]
+
+
+#     tab1,tab2 = st.tabs[("Home","More Info!")]
+    
+#     with tab1:
+
+#         queryCol1,queryCol2 = st.columns([0.8,0.2])
+#         with queryCol1:
+#             st.subheader("Query")
+#             st.markdown(st.session_state.query)
+#         with queryCol2:
+#             st.button("Edit Query",on_click = editcallback)
+#         st.subheader("Response")
+#         st.markdown(st.session_state.response)
+
+
+#         #homePageBaseDisplay(st.session_state.query,st.session_state.response)
+#         if st.session_state.response != None:
+#             createNewQuestions(st.session_state.query,st.session_state.response)
+        
+#         st.divider()
+
+#         with st.expander("Citations for response"):
+#             for i,reference in enumerate(citations):
+#                 col1,col2 = st.columns([0.9,0.1])
+#                 with col1:
+#                     st.caption(reference[0])
+#                     st.caption(reference[1])
+#                 #otherPapercheck.append(str(reference[1]))
+#                 with col2:
+#                     st.button(":thumbsdown:",key=f"Citations{i}")
+
+#         #homePageCitation(st.session_state.references)
+#         st.divider()
+        
+#         st.subheader("Feedback")
+#         responseFeedback = st.radio('Choose for the generated response',options=('Correct Response, No Hallucinations','Hallucinations','No Response'))
+#         st.session_state["feedbackRating"] = responseFeedback
+#         if responseFeedback:
+#             feedbackText = st.text_area("Please help us understand your feedback better")
+#             st.session_state["feedbackText"] = feedbackText
+#         #homePageFeedback()
+#         st.markdown("")
+#         st.markdown("") 
+        
+#         col1, col2, col3 = st.columns([1,1,1])
+#         col2.button("Search Again!",type="primary",on_click=reboot)
+
+
+#     with tab2:
+
+#         with st.expander("Other relevant papers"):
+#             for i,data in enumerate(pubmedPapers):
+#                 url = data["url"]
+#                 url = str(url)
+#                 col1,col2 = st.columns([0.9,0.1])
+#                 if url not in otherPapercheck:
+#                     with col1:
+#                         st.caption(data["title"])
+#                         st.caption(url)
+#                     with col2:
+#                         st.button(":thumbsup:",key=f"{i}")
+        
+
+
+#                 #st.button(label = ':thumbsdown')
+
+
+
+        
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
